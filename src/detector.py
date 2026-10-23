@@ -135,7 +135,8 @@ def detect_incidents(
         source = data[column]
         numeric = pd.to_numeric(source, errors="coerce")
         non_empty_mask = source.notna() & source.astype(str).str.strip().ne("")
-        invalid_numeric_mask = non_empty_mask & numeric.isna()
+        non_finite_mask = numeric.isin([float("inf"), float("-inf")])
+        invalid_numeric_mask = non_empty_mask & (numeric.isna() | non_finite_mask)
         numeric_values[column] = numeric
 
         if invalid_numeric_mask.any():
@@ -181,7 +182,11 @@ def detect_incidents(
     # inconsistencies in the recorded amount.
     valid_arithmetic_mask = pd.Series(True, index=data.index)
     for column in numeric_columns:
-        valid_arithmetic_mask &= numeric_values[column].notna()
+        numeric = numeric_values[column]
+        finite_mask = numeric.notna() & ~numeric.isin(
+            [float("inf"), float("-inf")]
+        )
+        valid_arithmetic_mask &= finite_mask
 
     if valid_arithmetic_mask.any():
         expected_totals = (

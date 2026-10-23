@@ -128,3 +128,42 @@ def test_blank_numeric_values_are_reported_as_missing_not_invalid_numeric(
         for item in incidents
     )
     pd.testing.assert_frame_equal(data, original)
+
+
+@pytest.mark.parametrize("column", ["quantity", "unit_price", "total_amount"])
+@pytest.mark.parametrize("non_finite_value", [float("inf"), float("-inf")])
+def test_non_finite_numeric_values_are_reported_as_invalid_numeric(
+    column, non_finite_value
+):
+    data = generate_sales_data(rows=10)
+    data[column] = data[column].astype(object)
+    data.loc[0, column] = non_finite_value
+    original = data.copy(deep=True)
+
+    incidents = detect_incidents(data)
+
+    assert any(
+        item["incident_type"] == "invalid_numeric_value"
+        and item["column"] == column
+        and item["evidence"]["affected_rows"] == ["0"]
+        for item in incidents
+    )
+    pd.testing.assert_frame_equal(data, original)
+
+
+def test_non_finite_values_are_excluded_from_arithmetic_consistency_check():
+    data = generate_sales_data(rows=10)
+    data["quantity"] = data["quantity"].astype(object)
+    data.loc[0, "quantity"] = float("inf")
+
+    incidents = detect_incidents(data)
+
+    assert any(
+        item["incident_type"] == "invalid_numeric_value"
+        and item["column"] == "quantity"
+        for item in incidents
+    )
+    assert not any(
+        item["incident_type"] == "inconsistent_total_amount"
+        for item in incidents
+    )
