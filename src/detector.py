@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from decimal import Decimal, ROUND_HALF_UP
+from numbers import Integral
 from typing import Any
 
 import pandas as pd
@@ -57,15 +59,38 @@ def detect_incidents(
     volume_drop_threshold: float = 0.30,
 ) -> list[dict[str, Any]]:
     """Detect common data-quality issues without modifying the input."""
-    if baseline_count is not None and baseline_count < 0:
-        raise ValueError("baseline_count cannot be negative")
+    if baseline_count is not None and (
+        isinstance(baseline_count, bool)
+        or not isinstance(baseline_count, Integral)
+        or baseline_count < 0
+    ):
+        raise ValueError("baseline_count must be a non-negative integer")
 
     if not 0 <= volume_drop_threshold < 1:
         raise ValueError("volume_drop_threshold must be between 0 and 1")
 
     incidents: list[dict[str, Any]] = []
 
+    duplicate_columns = sorted(
+        str(column) for column in data.columns[data.columns.duplicated(keep=False)].unique()
+    )
     missing_columns = sorted(REQUIRED_COLUMNS - set(data.columns))
+    if duplicate_columns:
+        schema_evidence: dict[str, Any] = {"duplicate_columns": duplicate_columns}
+        if missing_columns:
+            schema_evidence["missing_columns"] = missing_columns
+        incidents.append(
+            _incident(
+                incident_type="schema_drift",
+                severity="critical",
+                dataset=dataset_name,
+                column=None,
+                explanation="The dataset contains duplicate column names.",
+                evidence=schema_evidence,
+            )
+        )
+        return incidents
+
 
     if missing_columns:
         incidents.append(
@@ -79,6 +104,19 @@ def detect_incidents(
             )
         )
         return incidents
+
+    def row_reference(position: int) -> str:
+        label = str(data.index[position])
+        if data.index.is_unique:
+            return label
+        return f"{label} (position {position})"
+
+    def affected_row_references(mask: pd.Series, limit: int = 10) -> list[str]:
+        return [
+            row_reference(position)
+            for position, is_affected in enumerate(mask.to_numpy(dtype=bool))
+            if is_affected
+        ][:limit]
 
     for column in REQUIRED_VALUES:
         blank_mask = data[column].map(
@@ -96,9 +134,7 @@ def detect_incidents(
                     explanation=f"Column '{column}' contains missing values.",
                     evidence={
                         "missing_count": int(missing_mask.sum()),
-                        "affected_rows": [
-                            str(index) for index in data.index[missing_mask][:10]
-                        ],
+                        "affected_rows": affected_row_references(missing_mask),
                     },
                 )
             )
@@ -150,10 +186,7 @@ def detect_incidents(
                     evidence={
                         "column": column,
                         "invalid_count": int(invalid_numeric_mask.sum()),
-                        "affected_rows": [
-                            str(index)
-                            for index in data.index[invalid_numeric_mask][:10]
-                        ],
+                        "affected_rows": affected_row_references(invalid_numeric_mask),
                     },
                 )
             )
@@ -169,10 +202,7 @@ def detect_incidents(
                     explanation=f"Column '{column}' contains non-positive values.",
                     evidence={
                         "invalid_count": int(invalid_amount_mask.sum()),
-                        "affected_rows": [
-                            str(index)
-                            for index in data.index[invalid_amount_mask][:10]
-                        ],
+                        "affected_rows": affected_row_references(invalid_amount_mask),
                     },
                 )
             )
@@ -195,27 +225,23 @@ def detect_incidents(
             continue
 
         valid_positions.append(position)
-        expected_by_position[position] = round(
-            float(values["quantity"]) * float(values["unit_price"]), 2
+        expected_by_position[position] = float(
+            (Decimal(str(values["quantity"])) * Decimal(str(values["unit_price"])))
+            .quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         )
-        actual_by_position[position] = float(values["total_amount"])
+        actual_by_position[position] = float(
+            Decimal(str(values["total_amount"])).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+        )
 
     inconsistent_positions = [
         position
         for position in valid_positions
-        if abs(
-            expected_by_position[position] - actual_by_position[position]
-        ) > 1e-9
+        if expected_by_position[position] != actual_by_position[position]
     ]
 
     if inconsistent_positions:
-        # Preserve the existing index-label format when labels are unique.
-        # When labels repeat, add the zero-based row position to disambiguate.
-        def row_reference(position: int) -> str:
-            label = str(data.index[position])
-            if data.index.is_unique:
-                return label
-            return f"{label} (position {position})"
 
         evidence_positions = inconsistent_positions[:10]
         row_references = {

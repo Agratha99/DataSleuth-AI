@@ -214,3 +214,97 @@ def test_arithmetic_evidence_count_includes_rows_beyond_evidence_limit():
 
     assert incident["evidence"]["affected_count"] == 12
     assert len(incident["evidence"]["affected_rows"]) == 10
+
+
+@pytest.mark.parametrize(
+    "baseline_count",
+    [True, False, "10", 10.5, float("nan"), float("inf"), float("-inf"), -1],
+)
+def test_invalid_baseline_count_is_rejected(baseline_count):
+    data = generate_sales_data(rows=10)
+
+    with pytest.raises(ValueError):
+        detect_incidents(data, baseline_count=baseline_count)
+
+
+def test_duplicate_required_column_names_return_schema_drift():
+    data = generate_sales_data(rows=10)
+    data.columns = [*data.columns[:-1], "quantity"]
+
+    incidents = detect_incidents(data)
+
+    schema_incident = next(
+        item for item in incidents if item["incident_type"] == "schema_drift"
+    )
+    assert schema_incident["evidence"]["duplicate_columns"] == ["quantity"]
+
+
+def test_duplicate_column_names_and_missing_required_columns_are_reported_together():
+    data = generate_sales_data(rows=10).rename(columns={"customer_id": "client_id"})
+    data.columns = [*data.columns[:-1], "quantity"]
+
+    incidents = detect_incidents(data)
+
+    schema_incident = next(
+        item for item in incidents if item["incident_type"] == "schema_drift"
+    )
+    assert schema_incident["evidence"]["duplicate_columns"] == ["quantity"]
+    assert schema_incident["evidence"]["missing_columns"] == ["customer_id", "total_amount"]
+
+
+@pytest.mark.parametrize(
+    ("column", "value", "incident_type", "count_key"),
+    [
+        ("customer_id", None, "missing_values", "missing_count"),
+        ("quantity", "unknown", "invalid_numeric_value", "invalid_count"),
+        ("quantity", 0, "invalid_amounts", "invalid_count"),
+    ],
+)
+def test_row_level_evidence_disambiguates_duplicate_index_labels(
+    column, value, incident_type, count_key
+):
+    data = generate_sales_data(rows=10)
+    data[column] = data[column].astype(object)
+    data.iloc[0, data.columns.get_loc(column)] = value
+    data.iloc[1, data.columns.get_loc(column)] = value
+    data.index = [7, 7, *range(2, 10)]
+
+    incidents = detect_incidents(data)
+    incident = next(
+        item for item in incidents
+        if item["incident_type"] == incident_type and item["column"] == column
+    )
+
+    assert incident["evidence"][count_key] == 2
+    assert incident["evidence"]["affected_rows"] == [
+        "7 (position 0)", "7 (position 1)"
+    ]
+
+
+def test_cent_precision_ignores_sub_cent_difference():
+    data = generate_sales_data(rows=10)
+    data.loc[0, "quantity"] = 1
+    data.loc[0, "unit_price"] = 1.00
+    data.loc[0, "total_amount"] = 1.004
+
+    incidents = detect_incidents(data)
+
+    assert not any(
+        item["incident_type"] == "inconsistent_total_amount" for item in incidents
+    )
+
+
+def test_cent_precision_detects_one_cent_difference():
+    data = generate_sales_data(rows=10)
+    data.loc[0, "quantity"] = 1
+    data.loc[0, "unit_price"] = 1.00
+    data.loc[0, "total_amount"] = 1.01
+
+    incidents = detect_incidents(data)
+
+    incident = next(
+        item for item in incidents
+        if item["incident_type"] == "inconsistent_total_amount"
+    )
+    assert incident["evidence"]["expected_totals"]["0"] == 1.0
+    assert incident["evidence"]["actual_totals"]["0"] == 1.01
