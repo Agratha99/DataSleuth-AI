@@ -167,3 +167,50 @@ def test_non_finite_values_are_excluded_from_arithmetic_consistency_check():
         item["incident_type"] == "inconsistent_total_amount"
         for item in incidents
     )
+
+
+def test_arithmetic_evidence_handles_duplicate_index_labels():
+    data = generate_sales_data(rows=10)
+    data.loc[0, "quantity"] = 5
+    data.loc[0, "unit_price"] = 100.00
+    data.loc[0, "total_amount"] = 700.00
+    data.loc[1, "quantity"] = 2
+    data.loc[1, "unit_price"] = 20.00
+    data.loc[1, "total_amount"] = 100.00
+    data.index = [0, 0, *range(2, 10)]
+    original = data.copy(deep=True)
+
+    incidents = detect_incidents(data)
+    incident = next(
+        item for item in incidents
+        if item["incident_type"] == "inconsistent_total_amount"
+    )
+    evidence = incident["evidence"]
+
+    assert evidence["affected_count"] == 2
+    assert evidence["affected_rows"] == ["0 (position 0)", "0 (position 1)"]
+    assert evidence["expected_totals"] == {
+        "0 (position 0)": 500.0,
+        "0 (position 1)": 40.0,
+    }
+    assert evidence["actual_totals"] == {
+        "0 (position 0)": 700.0,
+        "0 (position 1)": 100.0,
+    }
+    pd.testing.assert_frame_equal(data, original)
+
+
+def test_arithmetic_evidence_count_includes_rows_beyond_evidence_limit():
+    data = generate_sales_data(rows=12)
+    data["quantity"] = 2
+    data["unit_price"] = 10.00
+    data["total_amount"] = 999.00
+
+    incidents = detect_incidents(data)
+    incident = next(
+        item for item in incidents
+        if item["incident_type"] == "inconsistent_total_amount"
+    )
+
+    assert incident["evidence"]["affected_count"] == 12
+    assert len(incident["evidence"]["affected_rows"]) == 10

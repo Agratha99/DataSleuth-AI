@@ -177,48 +177,74 @@ def detect_incidents(
                 )
             )
 
-    # Compare currency values at cent precision. Rounding the calculated total
-    # avoids binary floating-point artifacts while still detecting cent-level
-    # inconsistencies in the recorded amount.
-    valid_arithmetic_mask = pd.Series(True, index=data.index)
-    for column in numeric_columns:
-        numeric = numeric_values[column]
-        finite_mask = numeric.notna() & ~numeric.isin(
-            [float("inf"), float("-inf")]
-        )
-        valid_arithmetic_mask &= finite_mask
+    # Compare currency values at cent precision using row positions. Index labels
+    # are not guaranteed to be unique, so they must not be used for matching.
+    valid_positions: list[int] = []
+    expected_by_position: dict[int, float] = {}
+    actual_by_position: dict[int, float] = {}
 
-    if valid_arithmetic_mask.any():
-        expected_totals = (
-            numeric_values["quantity"] * numeric_values["unit_price"]
-        ).round(2)
-        actual_totals = numeric_values["total_amount"]
-        inconsistent_mask = valid_arithmetic_mask & (
-            (expected_totals - actual_totals).abs() > 1e-9
-        )
+    for position in range(len(data)):
+        values = {
+            column: numeric_values[column].iloc[position]
+            for column in numeric_columns
+        }
+        if not all(
+            pd.notna(value) and value not in (float("inf"), float("-inf"))
+            for value in values.values()
+        ):
+            continue
 
-        if inconsistent_mask.any():
-            affected_indices = data.index[inconsistent_mask][:10]
-            incidents.append(
-                _incident(
-                    incident_type="inconsistent_total_amount",
-                    severity="high",
-                    dataset=dataset_name,
-                    column="total_amount",
-                    explanation="Total amount does not equal quantity multiplied by unit price.",
-                    evidence={
-                        "affected_rows": [str(index) for index in affected_indices],
-                        "expected_totals": {
-                            str(index): float(expected_totals.loc[index])
-                            for index in affected_indices
-                        },
-                        "actual_totals": {
-                            str(index): float(actual_totals.loc[index])
-                            for index in affected_indices
-                        },
+        valid_positions.append(position)
+        expected_by_position[position] = round(
+            float(values["quantity"]) * float(values["unit_price"]), 2
+        )
+        actual_by_position[position] = float(values["total_amount"])
+
+    inconsistent_positions = [
+        position
+        for position in valid_positions
+        if abs(
+            expected_by_position[position] - actual_by_position[position]
+        ) > 1e-9
+    ]
+
+    if inconsistent_positions:
+        # Preserve the existing index-label format when labels are unique.
+        # When labels repeat, add the zero-based row position to disambiguate.
+        def row_reference(position: int) -> str:
+            label = str(data.index[position])
+            if data.index.is_unique:
+                return label
+            return f"{label} (position {position})"
+
+        evidence_positions = inconsistent_positions[:10]
+        row_references = {
+            position: row_reference(position) for position in evidence_positions
+        }
+
+        incidents.append(
+            _incident(
+                incident_type="inconsistent_total_amount",
+                severity="high",
+                dataset=dataset_name,
+                column="total_amount",
+                explanation="Total amount does not equal quantity multiplied by unit price.",
+                evidence={
+                    "affected_count": len(inconsistent_positions),
+                    "affected_rows": [
+                        row_references[position] for position in evidence_positions
+                    ],
+                    "expected_totals": {
+                        row_references[position]: expected_by_position[position]
+                        for position in evidence_positions
                     },
-                )
+                    "actual_totals": {
+                        row_references[position]: actual_by_position[position]
+                        for position in evidence_positions
+                    },
+                },
             )
+        )
 
     if baseline_count is not None:
         current_count = len(data)
